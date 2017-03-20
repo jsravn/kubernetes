@@ -217,6 +217,7 @@ func (adc *attachDetachController) podAdd(obj interface{}) {
 	}
 
 	if pod.Spec.NodeName == "" {
+		glog.Infof("%q/%q did not have a NodeName, ignoring", pod.Namespace, pod.Name)
 		// Ignore pods without NodeName, indicating they are not scheduled.
 		return
 	}
@@ -291,7 +292,7 @@ func (adc *attachDetachController) processPodVolumes(
 		// yet managed by the controller. Therefore, ignore the pod.
 		// If the node is added to the list of managed nodes in the future,
 		// future adds and updates to the pod will be processed.
-		glog.V(10).Infof(
+		glog.Infof(
 			"Skipping processing of pod %q/%q: it is scheduled to node %q which is not managed by the controller.",
 			pod.Namespace,
 			pod.Name,
@@ -303,7 +304,7 @@ func (adc *attachDetachController) processPodVolumes(
 	for _, podVolume := range pod.Spec.Volumes {
 		volumeSpec, err := adc.createVolumeSpec(podVolume, pod.Namespace)
 		if err != nil {
-			glog.V(10).Infof(
+			glog.Infof(
 				"Error processing volume %q for pod %q/%q: %v",
 				podVolume.Name,
 				pod.Namespace,
@@ -315,7 +316,7 @@ func (adc *attachDetachController) processPodVolumes(
 		attachableVolumePlugin, err :=
 			adc.volumePluginMgr.FindAttachablePluginBySpec(volumeSpec)
 		if err != nil || attachableVolumePlugin == nil {
-			glog.V(10).Infof(
+			glog.Infof(
 				"Skipping volume %q for pod %q/%q: it does not implement attacher interface. err=%v",
 				podVolume.Name,
 				pod.Namespace,
@@ -330,7 +331,7 @@ func (adc *attachDetachController) processPodVolumes(
 			_, err := adc.desiredStateOfWorld.AddPod(
 				uniquePodName, pod, volumeSpec, pod.Spec.NodeName)
 			if err != nil {
-				glog.V(10).Infof(
+				glog.Infof(
 					"Failed to add volume %q for pod %q/%q to desiredStateOfWorld. %v",
 					podVolume.Name,
 					pod.Namespace,
@@ -343,7 +344,7 @@ func (adc *attachDetachController) processPodVolumes(
 			uniqueVolumeName, err := volumehelper.GetUniqueVolumeNameFromSpec(
 				attachableVolumePlugin, volumeSpec)
 			if err != nil {
-				glog.V(10).Infof(
+				glog.Infof(
 					"Failed to delete volume %q for pod %q/%q from desiredStateOfWorld. GetUniqueVolumeNameFromSpec failed with %v",
 					podVolume.Name,
 					pod.Namespace,
