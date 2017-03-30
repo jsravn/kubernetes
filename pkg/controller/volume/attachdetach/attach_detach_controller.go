@@ -332,7 +332,7 @@ func (adc *attachDetachController) processPodVolumes(
 		attachableVolumePlugin, err :=
 			adc.volumePluginMgr.FindAttachablePluginBySpec(volumeSpec)
 		if err != nil || attachableVolumePlugin == nil {
-			glog.Warningf(
+			glog.V(10).Infof(
 				"Skipping volume %q for pod %q/%q: it does not implement attacher interface. err=%v",
 				podVolume.Name,
 				pod.Namespace,
