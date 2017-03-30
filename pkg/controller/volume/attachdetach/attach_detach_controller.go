@@ -56,6 +56,10 @@ const (
 	// desiredStateOfWorldPopulatorLoopSleepPeriod is the amount of time the
 	// DesiredStateOfWorldPopulator loop waits between successive executions
 	desiredStateOfWorldPopulatorLoopSleepPeriod time.Duration = 1 * time.Minute
+
+	// waitForSyncPeriod is the amount of time to wait at each loop for the
+	// informers to be synced at startup.
+	waitForSyncPeriod time.Duration = 100 * time.Millisecond
 )
 
 // AttachDetachController defines the operations supported by this controller.
@@ -107,6 +111,7 @@ func NewAttachDetachController(
 		UpdateFunc: adc.nodeUpdate,
 		DeleteFunc: adc.nodeDelete,
 	})
+	adc.nodeInformerHasSynced = nodeInformer.HasSynced
 
 	if err := adc.volumePluginMgr.InitPlugins(plugins, adc); err != nil {
 		return nil, fmt.Errorf("Could not initialize volume plugins for Attach/Detach Controller: %+v", err)
@@ -197,6 +202,11 @@ type attachDetachController struct {
 
 	// recorder is used to record events in the API server
 	recorder record.EventRecorder
+
+	// returns true if node informer has synced.
+	// used to wait for node informer to sync before processing pods, otherwise we won't be able
+	// to process existing volume information until the next 12h resync.
+	nodeInformerHasSynced func() bool
 }
 
 func (adc *attachDetachController) Run(stopCh <-chan struct{}) {
@@ -286,13 +296,19 @@ func (adc *attachDetachController) processPodVolumes(
 		return
 	}
 
+	// wait for node informer to be synced before processing pods
+	for !adc.nodeInformerHasSynced() {
+		time.Sleep(waitForSyncPeriod)
+		glog.Info("Waiting for node store to sync before processing pods")
+	}
+
 	if !adc.desiredStateOfWorld.NodeExists(pod.Spec.NodeName) {
 		// If the node the pod is scheduled to does not exist in the desired
 		// state of the world data structure, that indicates the node is not
 		// yet managed by the controller. Therefore, ignore the pod.
 		// If the node is added to the list of managed nodes in the future,
 		// future adds and updates to the pod will be processed.
-		glog.Infof(
+		glog.Warningf(
 			"Skipping processing of pod %q/%q: it is scheduled to node %q which is not managed by the controller.",
 			pod.Namespace,
 			pod.Name,
@@ -304,7 +320,7 @@ func (adc *attachDetachController) processPodVolumes(
 	for _, podVolume := range pod.Spec.Volumes {
 		volumeSpec, err := adc.createVolumeSpec(podVolume, pod.Namespace)
 		if err != nil {
-			glog.Infof(
+			glog.Warningf(
 				"Error processing volume %q for pod %q/%q: %v",
 				podVolume.Name,
 				pod.Namespace,
@@ -316,7 +332,7 @@ func (adc *attachDetachController) processPodVolumes(
 		attachableVolumePlugin, err :=
 			adc.volumePluginMgr.FindAttachablePluginBySpec(volumeSpec)
 		if err != nil || attachableVolumePlugin == nil {
-			glog.Infof(
+			glog.Warningf(
 				"Skipping volume %q for pod %q/%q: it does not implement attacher interface. err=%v",
 				podVolume.Name,
 				pod.Namespace,
@@ -331,7 +347,7 @@ func (adc *attachDetachController) processPodVolumes(
 			_, err := adc.desiredStateOfWorld.AddPod(
 				uniquePodName, pod, volumeSpec, pod.Spec.NodeName)
 			if err != nil {
-				glog.Infof(
+				glog.Warningf(
 					"Failed to add volume %q for pod %q/%q to desiredStateOfWorld. %v",
 					podVolume.Name,
 					pod.Namespace,
@@ -344,7 +360,7 @@ func (adc *attachDetachController) processPodVolumes(
 			uniqueVolumeName, err := volumehelper.GetUniqueVolumeNameFromSpec(
 				attachableVolumePlugin, volumeSpec)
 			if err != nil {
-				glog.Infof(
+				glog.Warningf(
 					"Failed to delete volume %q for pod %q/%q from desiredStateOfWorld. GetUniqueVolumeNameFromSpec failed with %v",
 					podVolume.Name,
 					pod.Namespace,
