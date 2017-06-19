@@ -40,6 +40,7 @@ import (
 	"k8s.io/kubernetes/pkg/util/metrics"
 
 	"github.com/golang/glog"
+	"k8s.io/kubernetes/pkg/client/leaderelection/resourcelock"
 )
 
 const (
@@ -66,7 +67,8 @@ var (
 )
 
 // NewEndpointController returns a new *EndpointController.
-func NewEndpointController(podInformer coreinformers.PodInformer, serviceInformer coreinformers.ServiceInformer, client clientset.Interface) *EndpointController {
+func NewEndpointController(podInformer coreinformers.PodInformer, serviceInformer coreinformers.ServiceInformer,
+	endpointsInformer coreinformers.EndpointsInformer, client clientset.Interface) *EndpointController {
 	if client != nil && client.Core().RESTClient().GetRateLimiter() != nil {
 		metrics.RegisterMetricAndTrackRateLimiterUsage("endpoint_controller", client.Core().RESTClient().GetRateLimiter())
 	}
@@ -97,6 +99,9 @@ func NewEndpointController(podInformer coreinformers.PodInformer, serviceInforme
 	e.podLister = podInformer.Lister()
 	e.podsSynced = podInformer.Informer().HasSynced
 
+	e.endpointsLister = endpointsInformer.Lister()
+	e.endpointsSynced = endpointsInformer.Informer().HasSynced
+
 	return e
 }
 
@@ -117,6 +122,13 @@ type EndpointController struct {
 	// podsSynced returns true if the pod shared informer has been synced at least once.
 	// Added as a member to the struct to allow injection for testing.
 	podsSynced cache.InformerSynced
+
+	// endpointsLister is able to list/get pods and is populated by the shared informer passed to
+	// NewEndpointController.
+	endpointsLister corelisters.EndpointsLister
+	// endpointsSynced returns true if the endpoints shared informer has been synced at least once.
+	// Added as a member to the struct to allow injection for testing.
+	endpointsSynced cache.InformerSynced
 
 	// Services that need to be updated. A channel is inappropriate here,
 	// because it allows services with lots of pods to be serviced much
@@ -416,7 +428,7 @@ func (e *EndpointController) syncService(key string) error {
 	subsets = endpoints.RepackSubsets(subsets)
 
 	// See if there's actually an update here.
-	currentEndpoints, err := e.client.Core().Endpoints(service.Namespace).Get(service.Name, metav1.GetOptions{})
+	currentEndpoints, err := e.endpointsLister.Endpoints(service.Namespace).Get(service.Name)
 	if err != nil {
 		if errors.IsNotFound(err) {
 			currentEndpoints = &v1.Endpoints{
@@ -471,13 +483,22 @@ func (e *EndpointController) syncService(key string) error {
 // some stragglers could have been left behind if the endpoint controller
 // reboots).
 func (e *EndpointController) checkLeftoverEndpoints() {
-	list, err := e.client.Core().Endpoints(metav1.NamespaceAll).List(metav1.ListOptions{})
+	//list, err := e.client.Core().Endpoints(metav1.NamespaceAll).List(metav1.ListOptions{})
+	list, err := e.endpointsLister.List(labels.Everything())
 	if err != nil {
 		utilruntime.HandleError(fmt.Errorf("Unable to list endpoints (%v); orphaned endpoints will not be cleaned up. (They're pretty harmless, but you can restart this component if you want another attempt made.)", err))
 		return
 	}
-	for i := range list.Items {
-		ep := &list.Items[i]
+	for i := range list {
+		ep := list[i]
+		if _, ok := ep.Annotations[resourcelock.LeaderElectionRecordAnnotationKey]; ok {
+			// when there are multiple controller-manager instances,
+			// we observe that it will delete leader-election endpoints after 5min
+			// and cause re-election
+			// so skip the delete here
+			// as leader-election only have endpoints without service
+			continue
+		}
 		key, err := keyFunc(ep)
 		if err != nil {
 			utilruntime.HandleError(fmt.Errorf("Unable to get key for endpoint %#v", ep))

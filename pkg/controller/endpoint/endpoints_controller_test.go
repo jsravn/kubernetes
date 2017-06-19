@@ -78,10 +78,10 @@ type serverResponse struct {
 	obj        interface{}
 }
 
-func makeTestServer(t *testing.T, namespace string, endpointsResponse serverResponse) (*httptest.Server, *utiltesting.FakeHandler) {
+func makeTestServer(t *testing.T, namespace string) (*httptest.Server, *utiltesting.FakeHandler) {
 	fakeEndpointsHandler := utiltesting.FakeHandler{
-		StatusCode:   endpointsResponse.statusCode,
-		ResponseBody: runtime.EncodeOrDie(testapi.Default.Codec(), endpointsResponse.obj.(runtime.Object)),
+		StatusCode:   http.StatusOK,
+		ResponseBody: runtime.EncodeOrDie(testapi.Default.Codec(), &v1.Endpoints{}),
 	}
 	mux := http.NewServeMux()
 	mux.Handle(testapi.Default.ResourcePath("endpoints", namespace, ""), &fakeEndpointsHandler)
@@ -95,39 +95,43 @@ func makeTestServer(t *testing.T, namespace string, endpointsResponse serverResp
 
 type endpointController struct {
 	*EndpointController
-	podStore     cache.Store
-	serviceStore cache.Store
+	podStore       cache.Store
+	serviceStore   cache.Store
+	endpointsStore cache.Store
 }
 
 func newController(url string) *endpointController {
 	client := clientset.NewForConfigOrDie(&restclient.Config{Host: url, ContentConfig: restclient.ContentConfig{GroupVersion: &api.Registry.GroupOrDie(v1.GroupName).GroupVersion}})
 	informerFactory := informers.NewSharedInformerFactory(client, controller.NoResyncPeriodFunc())
-	endpoints := NewEndpointController(informerFactory.Core().V1().Pods(), informerFactory.Core().V1().Services(), client)
+	endpoints := NewEndpointController(informerFactory.Core().V1().Pods(), informerFactory.Core().V1().Services(),
+		informerFactory.Core().V1().Endpoints(), client)
 	endpoints.podsSynced = alwaysReady
 	endpoints.servicesSynced = alwaysReady
+	endpoints.endpointsSynced = alwaysReady
 	return &endpointController{
 		endpoints,
 		informerFactory.Core().V1().Pods().Informer().GetStore(),
 		informerFactory.Core().V1().Services().Informer().GetStore(),
+		informerFactory.Core().V1().Endpoints().Informer().GetStore(),
 	}
 }
 
 func TestSyncEndpointsItemsPreserveNoSelector(t *testing.T) {
 	ns := metav1.NamespaceDefault
-	testServer, endpointsHandler := makeTestServer(t, ns,
-		serverResponse{http.StatusOK, &v1.Endpoints{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:            "foo",
-				Namespace:       ns,
-				ResourceVersion: "1",
-			},
-			Subsets: []v1.EndpointSubset{{
-				Addresses: []v1.EndpointAddress{{IP: "6.7.8.9", NodeName: &emptyNodeName}},
-				Ports:     []v1.EndpointPort{{Port: 1000}},
-			}},
-		}})
+	testServer, endpointsHandler := makeTestServer(t, ns)
 	defer testServer.Close()
 	endpoints := newController(testServer.URL)
+	endpoints.endpointsStore.Add(&v1.Endpoints{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "foo",
+			Namespace:       ns,
+			ResourceVersion: "1",
+		},
+		Subsets: []v1.EndpointSubset{{
+			Addresses: []v1.EndpointAddress{{IP: "6.7.8.9", NodeName: &emptyNodeName}},
+			Ports:     []v1.EndpointPort{{Port: 1000}},
+		}},
+	})
 	endpoints.serviceStore.Add(&v1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "foo", Namespace: ns},
 		Spec:       v1.ServiceSpec{Ports: []v1.ServicePort{{Port: 80}}},
@@ -138,29 +142,21 @@ func TestSyncEndpointsItemsPreserveNoSelector(t *testing.T) {
 
 func TestCheckLeftoverEndpoints(t *testing.T) {
 	ns := metav1.NamespaceDefault
-	// Note that this requests *all* endpoints, therefore metav1.NamespaceAll
-	// below.
-	testServer, _ := makeTestServer(t, metav1.NamespaceAll,
-		serverResponse{http.StatusOK, &v1.EndpointsList{
-			ListMeta: metav1.ListMeta{
-				ResourceVersion: "1",
-			},
-			Items: []v1.Endpoints{{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:            "foo",
-					Namespace:       ns,
-					ResourceVersion: "1",
-				},
-				Subsets: []v1.EndpointSubset{{
-					Addresses: []v1.EndpointAddress{{IP: "6.7.8.9", NodeName: &emptyNodeName}},
-					Ports:     []v1.EndpointPort{{Port: 1000}},
-				}},
-			}},
-		}})
+	testServer, _ := makeTestServer(t, ns)
 	defer testServer.Close()
 	endpoints := newController(testServer.URL)
+	endpoints.endpointsStore.Add(&v1.Endpoints{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "foo",
+			Namespace:       ns,
+			ResourceVersion: "1",
+		},
+		Subsets: []v1.EndpointSubset{{
+			Addresses: []v1.EndpointAddress{{IP: "6.7.8.9", NodeName: &emptyNodeName}},
+			Ports:     []v1.EndpointPort{{Port: 1000}},
+		}},
+	})
 	endpoints.checkLeftoverEndpoints()
-
 	if e, a := 1, endpoints.queue.Len(); e != a {
 		t.Fatalf("Expected %v, got %v", e, a)
 	}
@@ -170,23 +166,23 @@ func TestCheckLeftoverEndpoints(t *testing.T) {
 	}
 }
 
+//
 func TestSyncEndpointsProtocolTCP(t *testing.T) {
 	ns := "other"
-	testServer, endpointsHandler := makeTestServer(t, ns,
-		serverResponse{http.StatusOK, &v1.Endpoints{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:            "foo",
-				Namespace:       ns,
-				ResourceVersion: "1",
-			},
-			Subsets: []v1.EndpointSubset{{
-				Addresses: []v1.EndpointAddress{{IP: "6.7.8.9", NodeName: &emptyNodeName}},
-				Ports:     []v1.EndpointPort{{Port: 1000, Protocol: "TCP"}},
-			}},
-		}})
+	testServer, endpointsHandler := makeTestServer(t, ns)
 	defer testServer.Close()
 	endpoints := newController(testServer.URL)
-
+	endpoints.endpointsStore.Add(&v1.Endpoints{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "foo",
+			Namespace:       ns,
+			ResourceVersion: "1",
+		},
+		Subsets: []v1.EndpointSubset{{
+			Addresses: []v1.EndpointAddress{{IP: "6.7.8.9", NodeName: &emptyNodeName}},
+			Ports:     []v1.EndpointPort{{Port: 1000, Protocol: "TCP"}},
+		}},
+	})
 	addPods(endpoints.podStore, ns, 1, 1, 0)
 	endpoints.serviceStore.Add(&v1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "foo", Namespace: ns},
@@ -195,8 +191,10 @@ func TestSyncEndpointsProtocolTCP(t *testing.T) {
 			Ports:    []v1.ServicePort{{Port: 80, TargetPort: intstr.FromInt(8080), Protocol: "TCP"}},
 		},
 	})
+
 	endpoints.syncService(ns + "/foo")
-	endpointsHandler.ValidateRequestCount(t, 2)
+
+	endpointsHandler.ValidateRequestCount(t, 1)
 	data := runtime.EncodeOrDie(testapi.Default.Codec(), &v1.Endpoints{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            "foo",
@@ -213,20 +211,20 @@ func TestSyncEndpointsProtocolTCP(t *testing.T) {
 
 func TestSyncEndpointsProtocolUDP(t *testing.T) {
 	ns := "other"
-	testServer, endpointsHandler := makeTestServer(t, ns,
-		serverResponse{http.StatusOK, &v1.Endpoints{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:            "foo",
-				Namespace:       ns,
-				ResourceVersion: "1",
-			},
-			Subsets: []v1.EndpointSubset{{
-				Addresses: []v1.EndpointAddress{{IP: "6.7.8.9", NodeName: &emptyNodeName}},
-				Ports:     []v1.EndpointPort{{Port: 1000, Protocol: "UDP"}},
-			}},
-		}})
+	testServer, endpointsHandler := makeTestServer(t, ns)
 	defer testServer.Close()
 	endpoints := newController(testServer.URL)
+	endpoints.endpointsStore.Add(&v1.Endpoints{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "foo",
+			Namespace:       ns,
+			ResourceVersion: "1",
+		},
+		Subsets: []v1.EndpointSubset{{
+			Addresses: []v1.EndpointAddress{{IP: "6.7.8.9", NodeName: &emptyNodeName}},
+			Ports:     []v1.EndpointPort{{Port: 1000, Protocol: "UDP"}},
+		}},
+	})
 	addPods(endpoints.podStore, ns, 1, 1, 0)
 	endpoints.serviceStore.Add(&v1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "foo", Namespace: ns},
@@ -235,8 +233,10 @@ func TestSyncEndpointsProtocolUDP(t *testing.T) {
 			Ports:    []v1.ServicePort{{Port: 80, TargetPort: intstr.FromInt(8080), Protocol: "UDP"}},
 		},
 	})
+
 	endpoints.syncService(ns + "/foo")
-	endpointsHandler.ValidateRequestCount(t, 2)
+
+	endpointsHandler.ValidateRequestCount(t, 1)
 	data := runtime.EncodeOrDie(testapi.Default.Codec(), &v1.Endpoints{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            "foo",
@@ -253,17 +253,17 @@ func TestSyncEndpointsProtocolUDP(t *testing.T) {
 
 func TestSyncEndpointsItemsEmptySelectorSelectsAll(t *testing.T) {
 	ns := "other"
-	testServer, endpointsHandler := makeTestServer(t, ns,
-		serverResponse{http.StatusOK, &v1.Endpoints{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:            "foo",
-				Namespace:       ns,
-				ResourceVersion: "1",
-			},
-			Subsets: []v1.EndpointSubset{},
-		}})
+	testServer, endpointsHandler := makeTestServer(t, ns)
 	defer testServer.Close()
 	endpoints := newController(testServer.URL)
+	endpoints.endpointsStore.Add(&v1.Endpoints{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "foo",
+			Namespace:       ns,
+			ResourceVersion: "1",
+		},
+		Subsets: []v1.EndpointSubset{},
+	})
 	addPods(endpoints.podStore, ns, 1, 1, 0)
 	endpoints.serviceStore.Add(&v1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "foo", Namespace: ns},
@@ -272,7 +272,9 @@ func TestSyncEndpointsItemsEmptySelectorSelectsAll(t *testing.T) {
 			Ports:    []v1.ServicePort{{Port: 80, Protocol: "TCP", TargetPort: intstr.FromInt(8080)}},
 		},
 	})
+
 	endpoints.syncService(ns + "/foo")
+
 	data := runtime.EncodeOrDie(testapi.Default.Codec(), &v1.Endpoints{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            "foo",
@@ -289,17 +291,17 @@ func TestSyncEndpointsItemsEmptySelectorSelectsAll(t *testing.T) {
 
 func TestSyncEndpointsItemsEmptySelectorSelectsAllNotReady(t *testing.T) {
 	ns := "other"
-	testServer, endpointsHandler := makeTestServer(t, ns,
-		serverResponse{http.StatusOK, &v1.Endpoints{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:            "foo",
-				Namespace:       ns,
-				ResourceVersion: "1",
-			},
-			Subsets: []v1.EndpointSubset{},
-		}})
+	testServer, endpointsHandler := makeTestServer(t, ns)
 	defer testServer.Close()
 	endpoints := newController(testServer.URL)
+	endpoints.endpointsStore.Add(&v1.Endpoints{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "foo",
+			Namespace:       ns,
+			ResourceVersion: "1",
+		},
+		Subsets: []v1.EndpointSubset{},
+	})
 	addPods(endpoints.podStore, ns, 0, 1, 1)
 	endpoints.serviceStore.Add(&v1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "foo", Namespace: ns},
@@ -308,7 +310,9 @@ func TestSyncEndpointsItemsEmptySelectorSelectsAllNotReady(t *testing.T) {
 			Ports:    []v1.ServicePort{{Port: 80, Protocol: "TCP", TargetPort: intstr.FromInt(8080)}},
 		},
 	})
+
 	endpoints.syncService(ns + "/foo")
+
 	data := runtime.EncodeOrDie(testapi.Default.Codec(), &v1.Endpoints{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            "foo",
@@ -325,17 +329,17 @@ func TestSyncEndpointsItemsEmptySelectorSelectsAllNotReady(t *testing.T) {
 
 func TestSyncEndpointsItemsEmptySelectorSelectsAllMixed(t *testing.T) {
 	ns := "other"
-	testServer, endpointsHandler := makeTestServer(t, ns,
-		serverResponse{http.StatusOK, &v1.Endpoints{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:            "foo",
-				Namespace:       ns,
-				ResourceVersion: "1",
-			},
-			Subsets: []v1.EndpointSubset{},
-		}})
+	testServer, endpointsHandler := makeTestServer(t, ns)
 	defer testServer.Close()
 	endpoints := newController(testServer.URL)
+	endpoints.endpointsStore.Add(&v1.Endpoints{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "foo",
+			Namespace:       ns,
+			ResourceVersion: "1",
+		},
+		Subsets: []v1.EndpointSubset{},
+	})
 	addPods(endpoints.podStore, ns, 1, 1, 1)
 	endpoints.serviceStore.Add(&v1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "foo", Namespace: ns},
@@ -344,7 +348,9 @@ func TestSyncEndpointsItemsEmptySelectorSelectsAllMixed(t *testing.T) {
 			Ports:    []v1.ServicePort{{Port: 80, Protocol: "TCP", TargetPort: intstr.FromInt(8080)}},
 		},
 	})
+
 	endpoints.syncService(ns + "/foo")
+
 	data := runtime.EncodeOrDie(testapi.Default.Codec(), &v1.Endpoints{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            "foo",
@@ -362,20 +368,20 @@ func TestSyncEndpointsItemsEmptySelectorSelectsAllMixed(t *testing.T) {
 
 func TestSyncEndpointsItemsPreexisting(t *testing.T) {
 	ns := "bar"
-	testServer, endpointsHandler := makeTestServer(t, ns,
-		serverResponse{http.StatusOK, &v1.Endpoints{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:            "foo",
-				Namespace:       ns,
-				ResourceVersion: "1",
-			},
-			Subsets: []v1.EndpointSubset{{
-				Addresses: []v1.EndpointAddress{{IP: "6.7.8.9", NodeName: &emptyNodeName}},
-				Ports:     []v1.EndpointPort{{Port: 1000}},
-			}},
-		}})
+	testServer, endpointsHandler := makeTestServer(t, ns)
 	defer testServer.Close()
 	endpoints := newController(testServer.URL)
+	endpoints.endpointsStore.Add(&v1.Endpoints{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "foo",
+			Namespace:       ns,
+			ResourceVersion: "1",
+		},
+		Subsets: []v1.EndpointSubset{{
+			Addresses: []v1.EndpointAddress{{IP: "6.7.8.9", NodeName: &emptyNodeName}},
+			Ports:     []v1.EndpointPort{{Port: 1000}},
+		}},
+	})
 	addPods(endpoints.podStore, ns, 1, 1, 0)
 	endpoints.serviceStore.Add(&v1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "foo", Namespace: ns},
@@ -384,7 +390,9 @@ func TestSyncEndpointsItemsPreexisting(t *testing.T) {
 			Ports:    []v1.ServicePort{{Port: 80, Protocol: "TCP", TargetPort: intstr.FromInt(8080)}},
 		},
 	})
+
 	endpoints.syncService(ns + "/foo")
+
 	data := runtime.EncodeOrDie(testapi.Default.Codec(), &v1.Endpoints{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            "foo",
@@ -401,20 +409,20 @@ func TestSyncEndpointsItemsPreexisting(t *testing.T) {
 
 func TestSyncEndpointsItemsPreexistingIdentical(t *testing.T) {
 	ns := metav1.NamespaceDefault
-	testServer, endpointsHandler := makeTestServer(t, metav1.NamespaceDefault,
-		serverResponse{http.StatusOK, &v1.Endpoints{
-			ObjectMeta: metav1.ObjectMeta{
-				ResourceVersion: "1",
-				Name:            "foo",
-				Namespace:       ns,
-			},
-			Subsets: []v1.EndpointSubset{{
-				Addresses: []v1.EndpointAddress{{IP: "1.2.3.4", NodeName: &emptyNodeName, TargetRef: &v1.ObjectReference{Kind: "Pod", Name: "pod0", Namespace: ns}}},
-				Ports:     []v1.EndpointPort{{Port: 8080, Protocol: "TCP"}},
-			}},
-		}})
+	testServer, endpointsHandler := makeTestServer(t, ns)
 	defer testServer.Close()
 	endpoints := newController(testServer.URL)
+	endpoints.endpointsStore.Add(&v1.Endpoints{
+		ObjectMeta: metav1.ObjectMeta{
+			ResourceVersion: "1",
+			Name:            "foo",
+			Namespace:       ns,
+		},
+		Subsets: []v1.EndpointSubset{{
+			Addresses: []v1.EndpointAddress{{IP: "1.2.3.4", NodeName: &emptyNodeName, TargetRef: &v1.ObjectReference{Kind: "Pod", Name: "pod0", Namespace: ns}}},
+			Ports:     []v1.EndpointPort{{Port: 8080, Protocol: "TCP"}},
+		}},
+	})
 	addPods(endpoints.podStore, metav1.NamespaceDefault, 1, 1, 0)
 	endpoints.serviceStore.Add(&v1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "foo", Namespace: metav1.NamespaceDefault},
@@ -423,14 +431,14 @@ func TestSyncEndpointsItemsPreexistingIdentical(t *testing.T) {
 			Ports:    []v1.ServicePort{{Port: 80, Protocol: "TCP", TargetPort: intstr.FromInt(8080)}},
 		},
 	})
+
 	endpoints.syncService(ns + "/foo")
-	endpointsHandler.ValidateRequest(t, testapi.Default.ResourcePath("endpoints", metav1.NamespaceDefault, "foo"), "GET", nil)
+	endpointsHandler.ValidateRequestCount(t, 0)
 }
 
 func TestSyncEndpointsItems(t *testing.T) {
 	ns := "other"
-	testServer, endpointsHandler := makeTestServer(t, ns,
-		serverResponse{http.StatusOK, &v1.Endpoints{}})
+	testServer, endpointsHandler := makeTestServer(t, ns)
 	defer testServer.Close()
 	endpoints := newController(testServer.URL)
 	addPods(endpoints.podStore, ns, 3, 2, 0)
@@ -445,7 +453,9 @@ func TestSyncEndpointsItems(t *testing.T) {
 			},
 		},
 	})
+
 	endpoints.syncService("other/foo")
+
 	expectedSubsets := []v1.EndpointSubset{{
 		Addresses: []v1.EndpointAddress{
 			{IP: "1.2.3.4", NodeName: &emptyNodeName, TargetRef: &v1.ObjectReference{Kind: "Pod", Name: "pod0", Namespace: ns}},
@@ -460,18 +470,17 @@ func TestSyncEndpointsItems(t *testing.T) {
 	data := runtime.EncodeOrDie(testapi.Default.Codec(), &v1.Endpoints{
 		ObjectMeta: metav1.ObjectMeta{
 			ResourceVersion: "",
+			Name:            "foo",
 		},
 		Subsets: endptspkg.SortSubsets(expectedSubsets),
 	})
-	// endpointsHandler should get 2 requests - one for "GET" and the next for "POST".
-	endpointsHandler.ValidateRequestCount(t, 2)
+	endpointsHandler.ValidateRequestCount(t, 1)
 	endpointsHandler.ValidateRequest(t, testapi.Default.ResourcePath("endpoints", ns, ""), "POST", &data)
 }
 
 func TestSyncEndpointsItemsWithLabels(t *testing.T) {
 	ns := "other"
-	testServer, endpointsHandler := makeTestServer(t, ns,
-		serverResponse{http.StatusOK, &v1.Endpoints{}})
+	testServer, endpointsHandler := makeTestServer(t, ns)
 	defer testServer.Close()
 	endpoints := newController(testServer.URL)
 	addPods(endpoints.podStore, ns, 3, 2, 0)
@@ -490,7 +499,9 @@ func TestSyncEndpointsItemsWithLabels(t *testing.T) {
 			},
 		},
 	})
+
 	endpoints.syncService(ns + "/foo")
+
 	expectedSubsets := []v1.EndpointSubset{{
 		Addresses: []v1.EndpointAddress{
 			{IP: "1.2.3.4", NodeName: &emptyNodeName, TargetRef: &v1.ObjectReference{Kind: "Pod", Name: "pod0", Namespace: ns}},
@@ -505,34 +516,34 @@ func TestSyncEndpointsItemsWithLabels(t *testing.T) {
 	data := runtime.EncodeOrDie(testapi.Default.Codec(), &v1.Endpoints{
 		ObjectMeta: metav1.ObjectMeta{
 			ResourceVersion: "",
+			Name:            "foo",
 			Labels:          serviceLabels,
 		},
 		Subsets: endptspkg.SortSubsets(expectedSubsets),
 	})
-	// endpointsHandler should get 2 requests - one for "GET" and the next for "POST".
-	endpointsHandler.ValidateRequestCount(t, 2)
+	endpointsHandler.ValidateRequestCount(t, 1)
 	endpointsHandler.ValidateRequest(t, testapi.Default.ResourcePath("endpoints", ns, ""), "POST", &data)
 }
 
 func TestSyncEndpointsItemsPreexistingLabelsChange(t *testing.T) {
 	ns := "bar"
-	testServer, endpointsHandler := makeTestServer(t, ns,
-		serverResponse{http.StatusOK, &v1.Endpoints{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:            "foo",
-				Namespace:       ns,
-				ResourceVersion: "1",
-				Labels: map[string]string{
-					"foo": "bar",
-				},
-			},
-			Subsets: []v1.EndpointSubset{{
-				Addresses: []v1.EndpointAddress{{IP: "6.7.8.9", NodeName: &emptyNodeName}},
-				Ports:     []v1.EndpointPort{{Port: 1000}},
-			}},
-		}})
+	testServer, endpointsHandler := makeTestServer(t, ns)
 	defer testServer.Close()
 	endpoints := newController(testServer.URL)
+	endpoints.endpointsStore.Add(&v1.Endpoints{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "foo",
+			Namespace:       ns,
+			ResourceVersion: "1",
+			Labels: map[string]string{
+				"foo": "bar",
+			},
+		},
+		Subsets: []v1.EndpointSubset{{
+			Addresses: []v1.EndpointAddress{{IP: "6.7.8.9", NodeName: &emptyNodeName}},
+			Ports:     []v1.EndpointPort{{Port: 1000}},
+		}},
+	})
 	addPods(endpoints.podStore, ns, 1, 1, 0)
 	serviceLabels := map[string]string{"baz": "blah"}
 	endpoints.serviceStore.Add(&v1.Service{
@@ -546,7 +557,9 @@ func TestSyncEndpointsItemsPreexistingLabelsChange(t *testing.T) {
 			Ports:    []v1.ServicePort{{Port: 80, Protocol: "TCP", TargetPort: intstr.FromInt(8080)}},
 		},
 	})
+
 	endpoints.syncService(ns + "/foo")
+
 	data := runtime.EncodeOrDie(testapi.Default.Codec(), &v1.Endpoints{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            "foo",
