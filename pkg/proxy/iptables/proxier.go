@@ -164,6 +164,7 @@ type serviceInfo struct {
 type endpointsInfo struct {
 	endpoint       string // TODO: should be an endpointString type
 	isLocal        bool
+	notReady       bool
 	udpGracePeriod time.Duration
 	// The following fields we lazily compute and store here for performance
 	// reasons. If the protocol is the same as you expect it to be, then the
@@ -879,6 +880,21 @@ func endpointsToEndpointsMap(endpoints *api.Endpoints, hostname string) proxyEnd
 					endpoint:       net.JoinHostPort(addr.IP, strconv.Itoa(int(port.Port))),
 					isLocal:        addr.NodeName != nil && *addr.NodeName == hostname,
 					udpGracePeriod: udpGracePeriod,
+					notReady:       false,
+				}
+				endpointsMap[svcPortName] = append(endpointsMap[svcPortName], epInfo)
+			}
+			for i := range ss.NotReadyAddresses {
+				addr := &ss.NotReadyAddresses[i]
+				if addr.IP == "" {
+					glog.Warningf("ignoring invalid endpoint port %s with empty host", port.Name)
+					continue
+				}
+				epInfo := &endpointsInfo{
+					endpoint:       net.JoinHostPort(addr.IP, strconv.Itoa(int(port.Port))),
+					isLocal:        addr.NodeName != nil && *addr.NodeName == hostname,
+					udpGracePeriod: udpGracePeriod,
+					notReady:       true,
 				}
 				endpointsMap[svcPortName] = append(endpointsMap[svcPortName], epInfo)
 			}
