@@ -924,6 +924,22 @@ func (proxier *Proxier) OnEndpointsSynced() {
 	proxier.syncProxyRules()
 }
 
+func (proxier *Proxier) OnPodAdd(pod *api.Pod) {
+	// do nothing
+}
+
+func (proxier *Proxier) OnPodUpdate(oldPod, pod *api.Pod) {
+	// do nothing
+}
+
+func (proxier *Proxier) OnPodDelete(pod *api.Pod) {
+	// do nothing
+}
+
+func (proxier *Proxier) OnPodSynced() {
+	// do nothing
+}
+
 // This is where all of the ipvs calls happen.
 // assumes proxier.mu is held
 func (proxier *Proxier) syncProxyRules() {

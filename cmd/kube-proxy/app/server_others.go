@@ -132,6 +132,7 @@ func newProxyServer(
 	var proxier proxy.ProxyProvider
 	var serviceEventHandler proxyconfig.ServiceHandler
 	var endpointsEventHandler proxyconfig.EndpointsHandler
+	var podEventHandler proxyconfig.PodHandler
 
 	proxyMode := getProxyMode(string(config.Mode), iptInterface, ipsetInterface, iptables.LinuxKernelCompatTester{})
 	if proxyMode == proxyModeIPTables {
@@ -167,6 +168,7 @@ func newProxyServer(
 		proxier = proxierIPTables
 		serviceEventHandler = proxierIPTables
 		endpointsEventHandler = proxierIPTables
+		podEventHandler = proxierIPTables
 		// No turning back. Remove artifacts that might still exist from the userspace Proxier.
 		glog.V(0).Info("Tearing down inactive rules.")
 		// TODO this has side effects that should only happen when Run() is invoked.
@@ -202,6 +204,7 @@ func newProxyServer(
 		proxier = proxierIPVS
 		serviceEventHandler = proxierIPVS
 		endpointsEventHandler = proxierIPVS
+		podEventHandler = proxierIPVS
 		glog.V(0).Info("Tearing down inactive rules.")
 		// TODO this has side effects that should only happen when Run() is invoked.
 		userspace.CleanupLeftovers(iptInterface)
@@ -229,6 +232,7 @@ func newProxyServer(
 			return nil, fmt.Errorf("unable to create proxier: %v", err)
 		}
 		serviceEventHandler = proxierUserspace
+		podEventHandler = proxierUserspace
 		proxier = proxierUserspace
 
 		// Remove artifacts from the iptables and ipvs Proxier, if not on Windows.
@@ -265,6 +269,7 @@ func newProxyServer(
 		ConfigSyncPeriod:       config.ConfigSyncPeriod.Duration,
 		ServiceEventHandler:    serviceEventHandler,
 		EndpointsEventHandler:  endpointsEventHandler,
+		PodEventHandler:        podEventHandler,
 		HealthzServer:          healthzServer,
 	}, nil
 }

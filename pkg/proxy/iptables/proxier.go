@@ -163,6 +163,7 @@ type serviceInfo struct {
 type endpointsInfo struct {
 	endpoint string // TODO: should be an endpointString type
 	isLocal  bool
+	podUID   types.UID
 	// The following fields we lazily compute and store here for performance
 	// reasons. If the protocol is the same as you expect it to be, then the
 	// chainName can be reused, otherwise it should be recomputed.
@@ -384,6 +385,7 @@ type Proxier struct {
 	// with some partial data after kube-proxy restart.
 	endpointsSynced bool
 	servicesSynced  bool
+	podsSynced      bool
 	initialized     int32
 	syncRunner      *async.BoundedFrequencyRunner // governs calls to syncProxyRules
 
@@ -686,7 +688,7 @@ func (proxier *Proxier) OnServiceDelete(service *api.Service) {
 func (proxier *Proxier) OnServiceSynced() {
 	proxier.mu.Lock()
 	proxier.servicesSynced = true
-	proxier.setInitialized(proxier.servicesSynced && proxier.endpointsSynced)
+	proxier.setInitialized(proxier.servicesSynced && proxier.endpointsSynced && proxier.podsSynced)
 	proxier.mu.Unlock()
 
 	// Sync unconditionally - this is called once per lifetime.
@@ -746,7 +748,7 @@ func (proxier *Proxier) OnEndpointsDelete(endpoints *api.Endpoints) {
 func (proxier *Proxier) OnEndpointsSynced() {
 	proxier.mu.Lock()
 	proxier.endpointsSynced = true
-	proxier.setInitialized(proxier.servicesSynced && proxier.endpointsSynced)
+	proxier.setInitialized(proxier.servicesSynced && proxier.endpointsSynced && proxier.podsSynced)
 	proxier.mu.Unlock()
 
 	// Sync unconditionally - this is called once per lifetime.
@@ -834,6 +836,29 @@ func getLocalIPs(endpointsMap proxyEndpointsMap) map[types.NamespacedName]sets.S
 	return localIPs
 }
 
+// TODO: Implement
+func (proxier *Proxier) OnPodAdd(pod *api.Pod) {
+
+}
+
+func (proxier *Proxier) OnPodUpdate(oldPod, pod *api.Pod) {
+
+}
+
+func (proxier *Proxier) OnPodDelete(pod *api.Pod) {
+
+}
+
+func (proxier *Proxier) OnPodSynced() {
+	proxier.mu.Lock()
+	proxier.podsSynced = true
+	proxier.setInitialized(proxier.servicesSynced && proxier.endpointsSynced && proxier.podsSynced)
+	proxier.mu.Unlock()
+
+	// Sync unconditionally - this is called once per lifetime.
+	proxier.syncProxyRules()
+}
+
 // Translates single Endpoints object to proxyEndpointsMap.
 // This function is used for incremental updated of endpointsMap.
 //
@@ -867,6 +892,7 @@ func endpointsToEndpointsMap(endpoints *api.Endpoints, hostname string) proxyEnd
 				epInfo := &endpointsInfo{
 					endpoint: net.JoinHostPort(addr.IP, strconv.Itoa(int(port.Port))),
 					isLocal:  addr.NodeName != nil && *addr.NodeName == hostname,
+					podUID:   addr.TargetRef.UID,
 				}
 				endpointsMap[svcPortName] = append(endpointsMap[svcPortName], epInfo)
 			}
@@ -980,8 +1006,8 @@ func (proxier *Proxier) syncProxyRules() {
 		glog.V(4).Infof("syncProxyRules took %v", time.Since(start))
 	}()
 	// don't sync rules till we've received services and endpoints
-	if !proxier.endpointsSynced || !proxier.servicesSynced {
-		glog.V(2).Info("Not syncing iptables until Services and Endpoints have been received from master")
+	if !proxier.endpointsSynced || !proxier.servicesSynced || !proxier.podsSynced {
+		glog.V(2).Info("Not syncing iptables until Services, Endpoints, and Pods have been received from master")
 		return
 	}
 

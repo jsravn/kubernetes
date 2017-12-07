@@ -1106,3 +1106,19 @@ func isClosedError(err error) bool {
 	// TODO: maybe create a stoppable TCP listener that returns a StoppedError
 	return strings.HasSuffix(err.Error(), "use of closed network connection")
 }
+
+func (proxier *Proxier) OnPodAdd(pod *api.Pod) {
+	// do nothing
+}
+
+func (proxier *Proxier) OnPodUpdate(oldPod, pod *api.Pod) {
+	// do nothing
+}
+
+func (proxier *Proxier) OnPodDelete(pod *api.Pod) {
+	// do nothing
+}
+
+func (proxier *Proxier) OnPodSynced() {
+	// do nothing
+}
