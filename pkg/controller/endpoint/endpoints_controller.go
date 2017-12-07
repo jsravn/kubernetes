@@ -43,6 +43,7 @@ import (
 	"k8s.io/kubernetes/pkg/util/metrics"
 
 	"github.com/golang/glog"
+	"math"
 )
 
 const (
@@ -66,6 +67,12 @@ const (
 	// This field is deprecated. v1.Service.PublishNotReadyAddresses will replace it
 	// subsequent releases.
 	TolerateUnreadyEndpointsAnnotation = "service.alpha.kubernetes.io/tolerate-unready-endpoints"
+
+	// ConnectionGracePeriodAnnotation is an annotation on an endpoint indicating how long
+	// to give active connections to close on their own before termination. This is primarily
+	// intended for UDP connections which don't have their own close semantics. On endpoint
+	// deletion, related UDP connections should be given up to this time before closing forcefully.
+	UDPConnectionGracePeriodSecondsAnnotation = "kubernetes.io/udp-connection-grace-period-seconds"
 )
 
 var (
@@ -433,8 +440,16 @@ func (e *EndpointController) syncService(key string) error {
 	subsets := []v1.EndpointSubset{}
 	var totalReadyEps int = 0
 	var totalNotReadyEps int = 0
+	var udpConnectionGracePeriod int64 = 0
 
 	for _, pod := range pods {
+		// Use largest pod termination grace period for connection grace period.
+		if podGracePeriod := pod.Spec.TerminationGracePeriodSeconds; podGracePeriod != nil {
+			if udpConnectionGracePeriod < *podGracePeriod {
+				udpConnectionGracePeriod = *podGracePeriod
+			}
+		}
+
 		if len(pod.Status.PodIP) == 0 {
 			glog.V(5).Infof("Failed to find an IP for pod %s/%s", pod.Namespace, pod.Name)
 			continue
@@ -507,6 +522,9 @@ func (e *EndpointController) syncService(key string) error {
 	newEndpoints.Labels = service.Labels
 	if newEndpoints.Annotations == nil {
 		newEndpoints.Annotations = make(map[string]string)
+	}
+	if udpConnectionGracePeriod > 0 {
+		newEndpoints.Annotations[UDPConnectionGracePeriodSecondsAnnotation] = strconv.FormatInt(udpConnectionGracePeriod, 10)
 	}
 
 	glog.V(4).Infof("Update endpoints for %v/%v, ready: %d not ready: %d", service.Namespace, service.Name, totalReadyEps, totalNotReadyEps)

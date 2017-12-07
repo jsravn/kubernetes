@@ -44,6 +44,7 @@ import (
 	apiservice "k8s.io/kubernetes/pkg/api/service"
 	api "k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/apis/core/helper"
+	"k8s.io/kubernetes/pkg/controller/endpoint"
 	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/proxy"
 	"k8s.io/kubernetes/pkg/proxy/healthcheck"
@@ -161,8 +162,9 @@ type serviceInfo struct {
 
 // internal struct for endpoints information
 type endpointsInfo struct {
-	endpoint string // TODO: should be an endpointString type
-	isLocal  bool
+	endpoint       string // TODO: should be an endpointString type
+	isLocal        bool
+	udpGracePeriod time.Duration
 	// The following fields we lazily compute and store here for performance
 	// reasons. If the protocol is the same as you expect it to be, then the
 	// chainName can be reused, otherwise it should be recomputed.
@@ -843,6 +845,15 @@ func endpointsToEndpointsMap(endpoints *api.Endpoints, hostname string) proxyEnd
 		return nil
 	}
 
+	var udpGracePeriod time.Duration
+	if annotations := endpoints.Annotations; annotations != nil {
+		if gracePeriodSeconds, exists := annotations[endpoint.UDPConnectionGracePeriodSecondsAnnotation]; exists {
+			if i, err := strconv.ParseInt(gracePeriodSeconds, 10, 64); err != nil {
+				udpGracePeriod = time.Second * time.Duration(i)
+			}
+		}
+	}
+
 	endpointsMap := make(proxyEndpointsMap)
 	// We need to build a map of portname -> all ip:ports for that
 	// portname.  Explode Endpoints.Subsets[*] into this structure.
@@ -865,8 +876,9 @@ func endpointsToEndpointsMap(endpoints *api.Endpoints, hostname string) proxyEnd
 					continue
 				}
 				epInfo := &endpointsInfo{
-					endpoint: net.JoinHostPort(addr.IP, strconv.Itoa(int(port.Port))),
-					isLocal:  addr.NodeName != nil && *addr.NodeName == hostname,
+					endpoint:       net.JoinHostPort(addr.IP, strconv.Itoa(int(port.Port))),
+					isLocal:        addr.NodeName != nil && *addr.NodeName == hostname,
+					udpGracePeriod: udpGracePeriod,
 				}
 				endpointsMap[svcPortName] = append(endpointsMap[svcPortName], epInfo)
 			}
