@@ -84,6 +84,9 @@ const (
 	kubeForwardChain utiliptables.Chain = "KUBE-FORWARD"
 )
 
+// delay udp connection flush
+var udpConnectionFlushDelay = 30 * time.Second
+
 // IPTablesVersioner can query the current iptables version.
 type IPTablesVersioner interface {
 	// returns "X.Y.Z"
@@ -962,16 +965,37 @@ func (esp *endpointServicePair) IPPart() string {
 // After a UDP endpoint has been removed, we must flush any pending conntrack entries to it, or else we
 // risk sending more traffic to it, all of which will be lost (because UDP).
 // This assumes the proxier mutex is held
+// TODO: move it to util
 func (proxier *Proxier) deleteEndpointConnections(connectionMap map[endpointServicePair]bool) {
 	for epSvcPair := range connectionMap {
 		if svcInfo, ok := proxier.serviceMap[epSvcPair.servicePortName]; ok && svcInfo.protocol == api.ProtocolUDP {
-			endpointIP := epSvcPair.endpoint[0:strings.Index(epSvcPair.endpoint, ":")]
-			err := utilproxy.ClearUDPConntrackForPeers(proxier.exec, svcInfo.clusterIP.String(), endpointIP)
-			if err != nil {
-				glog.Errorf("Failed to delete %s endpoint connections, error: %v", epSvcPair.servicePortName.String(), err)
+			// Delay UDP flush so in-flight requests are not immediately dropped before they have a chance to complete.
+			go proxier.asyncDeleteEndpointPair(svcInfo, epSvcPair)
+		}
+	}
+}
+
+func (proxier *Proxier) deleteEndpointPair(svcInfo *serviceInfo, epSvcPair endpointServicePair) {
+	endpointIP := epSvcPair.endpoint[0:strings.Index(epSvcPair.endpoint, ":")]
+	err := utilproxy.ClearUDPConntrackForPeers(proxier.exec, svcInfo.clusterIP.String(), endpointIP)
+	if err != nil {
+		glog.Errorf("Failed to delete %s endpoint connections, error: %v", epSvcPair.servicePortName.String(), err)
+	}
+}
+
+func (proxier *Proxier) asyncDeleteEndpointPair(svcInfo *serviceInfo, epSvcPair endpointServicePair) {
+	time.Sleep(udpConnectionFlushDelay)
+	proxier.mu.Lock()
+	defer proxier.mu.Unlock()
+	if endpoints, ok := proxier.endpointsMap[epSvcPair.servicePortName]; ok {
+		for _, ep := range endpoints {
+			if ep.endpoint == epSvcPair.endpoint {
+				// endpoint has come back, don't drop connections
+				return
 			}
 		}
 	}
+	proxier.deleteEndpointPair(svcInfo, epSvcPair)
 }
 
 // This is where all of the iptables-save/restore calls happen.

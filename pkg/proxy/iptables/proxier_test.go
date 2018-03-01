@@ -228,10 +228,12 @@ func TestDeleteEndpointConnections(t *testing.T) {
 		},
 	}
 
+	udpConnectionFlushDelay = time.Millisecond
 	expectCommandExecCount := 0
 	for i := range testCases {
 		input := map[endpointServicePair]bool{testCases[i]: true}
 		fakeProxier.deleteEndpointConnections(input)
+		time.Sleep(5*time.Millisecond)
 		svcInfo := fakeProxier.serviceMap[testCases[i].servicePortName]
 		if svcInfo.protocol == api.ProtocolUDP {
 			svcIp := svcInfo.clusterIP.String()
