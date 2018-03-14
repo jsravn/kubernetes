@@ -85,7 +85,7 @@ const (
 )
 
 // delay udp connection flush
-var udpConnectionFlushDelay = 30 * time.Second
+var udpConnectionFlushDelay = 5 * time.Second
 
 // IPTablesVersioner can query the current iptables version.
 type IPTablesVersioner interface {
